@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# bot.py - Telegram CMS Bot - SePay QR + Auto Credit
+# bot.py - Telegram CMS Bot - SePay QR + Webhook Auto Credit
 
 import asyncio
 import os
@@ -27,13 +27,12 @@ from telegram.ext import (
 BOT_TOKEN = "8770603050:AAEVcAsHAWG-PWUYNNAlpSj5r-Eedfl3Lh8"
 ADMIN_IDS = [8343227510]
 
-# SePay Config (ĐÃ CẬP NHẬT TOKEN)
+# SePay Config
 SEPAY_API_TOKEN = "VOPZJZX7MVTL2NB6EZT9AYD3FQKP7IYKGIIDPP5RX3R8DG5CJAXH1SQVLUFNQM1O"
 SEPAY_ACCOUNT_NUMBER = "0896451858"
 SEPAY_ACCOUNT_NAME = "NGUYEN THI BICH HUYEN"
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.db")
-# bot.py - Phần 2
 
 # ======================== DATABASE ========================
 async def init_db():
@@ -106,7 +105,7 @@ async def init_db():
             pass
         await db.commit()
     print("✅ Database initialized!")
-    # bot.py - Phần 3
+    # bot.py - Phần 2
 
 # ======================== CORE FUNCTIONS ========================
 async def get_user(user_id: int):
@@ -174,7 +173,7 @@ async def add_key(key_type: str, key_value: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('INSERT INTO keys (key_type, key_value) VALUES (?,?)', (key_type, key_value))
         await db.commit()
-        # bot.py - Phần 4
+        # bot.py - Phần 3
 
 # ======================== SEPAY API ========================
 def generate_sepay_qr(amount, description):
@@ -183,7 +182,6 @@ def generate_sepay_qr(amount, description):
         encoded_info = urllib.parse.quote(description)
         account_no = SEPAY_ACCOUNT_NUMBER
         
-        # SePay QR URL
         qr_url = f"https://qr.sepay.vn/img?acc={account_no}&bank=MB&amount={amount}&des={encoded_info}"
         print(f"🔄 Tạo QR SePay: {qr_url}")
         
@@ -235,7 +233,9 @@ def sepay_get_transactions(limit=50):
     except Exception as e:
         print(f"❌ Exception: {e}")
         return []
+        # bot.py - Phần 4
 
+# ======================== SEPAY POLLING ========================
 async def sepay_polling(context: ContextTypes.DEFAULT_TYPE):
     """Polling SePay mỗi 30 giây để kiểm tra giao dịch mới và tự động cộng tiền"""
     print("🔄 Bắt đầu polling SePay...")
@@ -297,99 +297,85 @@ async def sepay_polling(context: ContextTypes.DEFAULT_TYPE):
                         break
         except Exception as e:
             print(f"Polling error: {e}")
-            # bot.py - Phần 5
 
-# ======================== KEYBOARDS ========================
-def admin_main_menu():
-    keyboard = [
-        [InlineKeyboardButton("📂 Danh mục", callback_data="admin:category")],
-        [InlineKeyboardButton("🔑 Key", callback_data="admin:key")],
-        [InlineKeyboardButton("👥 User", callback_data="admin:user")],
-        [InlineKeyboardButton("💰 Tiền", callback_data="admin:money")],
-        [InlineKeyboardButton("📊 Thống kê", callback_data="admin:stats")],
-        [InlineKeyboardButton("⚙️ Cài đặt", callback_data="admin:settings")],
-        [InlineKeyboardButton("📢 Thông báo", callback_data="admin:broadcast")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
+# ======================== FLASK WEBHOOK ========================
+from flask import Flask, request, jsonify
+import threading
 
-def user_main_menu():
-    keyboard = [
-        [InlineKeyboardButton("🛒 Mua Key", callback_data="user:buy")],
-        [InlineKeyboardButton("💰 Số dư", callback_data="user:balance")],
-        [InlineKeyboardButton("📋 Lịch sử", callback_data="user:history")],
-        [InlineKeyboardButton("💳 Nạp tiền", callback_data="user:nap")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
+flask_app = Flask(__name__)
 
-# ======================== USER HANDLERS ========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await create_user(user.id, user.username or user.full_name)
-    await update.message.reply_text(
-        f"Xin chào {user.full_name}!",
-        reply_markup=user_main_menu()
-    )
+@flask_app.route('/webhook', methods=['POST'])
+def sepay_webhook():
+    """Xử lý webhook từ SePay khi có giao dịch mới"""
+    try:
+        data = request.get_json()
+        print(f"📨 Nhận webhook từ SePay: {data}")
+        
+        transaction = data.get('data', {})
+        content = transaction.get('content', '')
+        amount = abs(float(transaction.get('transferAmount', 0)))
+        
+        print(f"🔍 Nội dung: {content}, Số tiền: {amount}")
+        
+        async def process_webhook():
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute('SELECT * FROM pending_nap WHERE trans_id=? AND status="pending"', (content,)) as cursor:
+                    pending = await cursor.fetchone()
+            
+            if pending:
+                print(f"✅ Tìm thấy lệnh nạp: {pending['trans_id']}")
+                
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute('UPDATE pending_nap SET status="completed" WHERE id=?', (pending['id'],))
+                    await db.commit()
+                
+                await update_balance(pending['user_id'], pending['amount'])
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,?,?)',
+                                     (pending['user_id'], pending['amount'], 'deposit', f'Nạp tiền tự động - Webhook - {content}'))
+                    await db.commit()
+                
+                try:
+                    user = await get_user(pending['user_id'])
+                    await application.bot.send_message(
+                        chat_id=pending['user_id'],
+                        text=f"✅ **Nạp tiền thành công!**\n\n"
+                             f"💰 Số tiền: +{pending['amount']:,}đ\n"
+                             f"💳 Số dư mới: {user['balance'] + pending['amount']:,}đ\n"
+                             f"📝 Mã giao dịch: `{content}`",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+                
+                return jsonify({"status": "success", "message": "Đã cộng tiền thành công"}), 200
+            else:
+                print(f"❌ Không tìm thấy lệnh nạp với nội dung: {content}")
+                return jsonify({"status": "error", "message": "Không tìm thấy lệnh nạp"}), 404
+                
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(process_webhook())
+        
+        return jsonify({"status": "ok"}), 200
+        
+    except Exception as e:
+        print(f"❌ Lỗi xử lý webhook: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None):
-    cats = await get_categories(parent_id)
-    keyboard = []
-    for cat in cats:
-        icon = cat['icon'] + ' ' if cat['icon'] else ''
-        text = f"{icon}{cat['name']} {'▶️' if cat['type']=='category' else ''}"
-        cb = f"cat:{cat['id']}" if cat['type']=='category' else f"prod:{cat['id']}"
-        keyboard.append([InlineKeyboardButton(text, callback_data=cb)])
-    if parent_id is not None:
-        p = await get_category(parent_id)
-        grand = p['parent_id'] if p else None
-        back = f"cat_back:{grand}" if grand is not None else "cat_back:root"
-        keyboard.append([InlineKeyboardButton("🔙 Quay lại", callback_data=back)])
-    else:
-        keyboard.append([InlineKeyboardButton("🔙 Trang chính", callback_data="user:menu")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        await update.callback_query.edit_message_text("🛒 Chọn danh mục:", reply_markup=reply_markup)
-    else:
-        await update.message.reply_text("🛒 Chọn danh mục:", reply_markup=reply_markup)
+@flask_app.route('/')
+def home():
+    return "Bot is running!"
 
-async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    await query.answer()
-    if data == "cat_back:root":
-        await show_categories(update, context, None)
-    elif data.startswith("cat_back:"):
-        parent_id = int(data.split(":")[1])
-        await show_categories(update, context, parent_id)
-    elif data.startswith("cat:"):
-        cat_id = int(data.split(":")[1])
-        await show_categories(update, context, cat_id)
-    elif data.startswith("prod:"):
-        prod_id = int(data.split(":")[1])
-        await product_detail(update, context, prod_id)
+@flask_app.route('/health')
+def health():
+    return "OK"
 
-async def product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, prod_id: int):
-    query = update.callback_query
-    prod = await get_category(prod_id)
-    if not prod or prod['type'] != 'product':
-        await query.answer("Sản phẩm không tồn tại!")
-        return
-    user = await get_user(update.effective_user.id)
-    role = user['role'] if user else 'user'
-    if role == 'seller' and prod['price_seller'] > 0:
-        price = prod['price_seller']
-        label = "🏷️ Giá đại lý"
-    else:
-        price = prod['price']
-        label = "💰 Giá bán lẻ"
-    stock = await get_available_stock(prod['key_type'])
-    text = f"🛍 {prod['name']}\n{label}: {price:,}đ\n📦 Còn: {stock}"
-    parent = prod['parent_id']
-    back_cb = f"cat_back:{parent}" if parent is not None else "cat_back:root"
-    keyboard = [
-        [InlineKeyboardButton("🛒 Mua ngay", callback_data=f"buy:{prod_id}")],
-        [InlineKeyboardButton("🔙 Quay lại", callback_data=back_cb)],
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port, debug=False)
     # bot.py - Phần 5
 
 # ======================== KEYBOARDS ========================
@@ -413,6 +399,7 @@ def user_main_menu():
         [InlineKeyboardButton("💳 Nạp tiền", callback_data="user:nap")],
     ]
     return InlineKeyboardMarkup(keyboard)
+    # bot.py - Phần 6
 
 # ======================== USER HANDLERS ========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -459,6 +446,7 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("prod:"):
         prod_id = int(data.split(":")[1])
         await product_detail(update, context, prod_id)
+        # bot.py - Phần 7
 
 async def product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, prod_id: int):
     query = update.callback_query
@@ -483,7 +471,6 @@ async def product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
         [InlineKeyboardButton("🔙 Quay lại", callback_data=back_cb)],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    # bot.py - Phần 6
 
 async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -514,6 +501,7 @@ async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          (user_id, -price, 'purchase', f'Mua {prod["name"]}'))
         await db.commit()
     await query.edit_message_text(f"✅ Mua thành công!\n🔑 Key: `{key_value}`", parse_mode='Markdown')
+    # bot.py - Phần 8
 
 async def user_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -550,7 +538,6 @@ async def user_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Sau khi chuyển, bot sẽ **tự động cộng tiền** vào số dư!",
             parse_mode='Markdown'
         )
-        # bot.py - Phần 7
 
 # ======================== LỆNH NẠP TIỀN ========================
 async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -580,13 +567,11 @@ async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     print(f"📥 User {user_id} nạp {amount}đ")
     
-    # Tạo mã giao dịch duy nhất
     order_code = f"NAP_{user_id}_{int(time.time())}_{random.randint(100,999)}"
     transfer_content = order_code
     
     print(f"📝 Mã giao dịch: {order_code}")
     
-    # Lưu vào database với trạng thái pending
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('INSERT INTO pending_nap (user_id, amount, trans_id) VALUES (?,?,?)',
                          (user_id, amount, order_code))
@@ -594,7 +579,6 @@ async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['nap_trans_id'] = order_code
     
-    # Tạo QR SePay
     qr_path = generate_sepay_qr(amount, transfer_content)
     
     keyboard = [
@@ -613,7 +597,6 @@ async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏰ Lệnh có hiệu lực trong 60 phút."
     )
     
-    # Gửi QR
     if qr_path and os.path.exists(qr_path):
         try:
             with open(qr_path, 'rb') as photo:
@@ -629,7 +612,6 @@ async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Lỗi gửi ảnh QR: {e}")
     
-    # Fallback: gửi link QR
     qr_url = f"https://qr.sepay.vn/img?acc={SEPAY_ACCOUNT_NUMBER}&bank=MB&amount={amount}&des={urllib.parse.quote(transfer_content)}"
     caption += f"\n\n🔗 [Bấm vào đây để xem mã QR]({qr_url})"
     await update.message.reply_text(
@@ -639,7 +621,7 @@ async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True
     )
     print(f"✅ Đã gửi QR link cho user {user_id}")
-    # bot.py - Phần 8
+    # bot.py - Phần 9
 
 # ======================== CANCEL NAP ========================
 async def cancel_nap(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -682,7 +664,6 @@ async def check_nap_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pass
         return
     
-    # Lấy giao dịch từ SePay
     transactions = sepay_get_transactions(50)
     found = False
     
@@ -735,7 +716,7 @@ async def check_nap_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"• Bấm lại nút 'Kiểm tra' sau vài phút\n"
             f"• Bot cũng sẽ tự động cộng tiền qua polling"
         )
-        # bot.py - Phần 9
+        # bot.py - Phần 10
 
 # ======================== ADMIN COMMANDS ========================
 async def add_seller(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -761,10 +742,12 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("👑 Admin Panel", reply_markup=admin_main_menu())
     else:
         await update.message.reply_text("👑 Admin Panel", reply_markup=admin_main_menu())
-        # bot.py - Phần 10
 
 # ======================== MAIN ========================
+application = None
+
 async def main():
+    global application
     await init_db()
     
     print("🔄 Đang kiểm tra kết nối SePay...")
@@ -775,22 +758,18 @@ async def main():
         print("⚠️ Không thể kết nối SePay. Kiểm tra lại API Token.")
     
     application = Application.builder().token(BOT_TOKEN).build()
-    print(f"🤖 Bot Token: {BOT_TOKEN[:10]}...")
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("addseller", add_seller))
     application.add_handler(CommandHandler("nap", nap_command))
-    print("✅ Đã đăng ký các lệnh: /start, /addseller, /nap")
 
     application.add_handler(CallbackQueryHandler(user_menu_handler, pattern="^user:"))
     application.add_handler(CallbackQueryHandler(category_callback, pattern="^(cat:|prod:|buy:|cat_back:)"))
     application.add_handler(CallbackQueryHandler(check_nap_callback, pattern="^check_nap:"))
     application.add_handler(CallbackQueryHandler(cancel_nap, pattern="^cancel_nap:"))
     application.add_handler(CallbackQueryHandler(admin_menu, pattern="^admin:menu$"))
-    print("✅ Đã đăng ký các callback handlers")
 
     asyncio.create_task(sepay_polling(application.bot))
-    print("🔄 Đã khởi tạo polling SePay")
 
     print("🚀 Đang khởi động bot...")
     await application.initialize()
@@ -800,4 +779,10 @@ async def main():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
+    # Chạy Flask trong luồng riêng để nhận webhook
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
+    
+    # Chạy bot
     asyncio.run(main())
+    
