@@ -446,63 +446,95 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("prod:"):
         prod_id = int(data.split(":")[1])
         await product_detail(update, context, prod_id)
-        # bot.py - Phần 7
+        # bot.py - Phần 7 (SỬA - NỘI DUNG NGẮN)
 
-async def product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, prod_id: int):
-    query = update.callback_query
-    prod = await get_category(prod_id)
-    if not prod or prod['type'] != 'product':
-        await query.answer("Sản phẩm không tồn tại!")
-        return
-    user = await get_user(update.effective_user.id)
-    role = user['role'] if user else 'user'
-    if role == 'seller' and prod['price_seller'] > 0:
-        price = prod['price_seller']
-        label = "🏷️ Giá đại lý"
-    else:
-        price = prod['price']
-        label = "💰 Giá bán lẻ"
-    stock = await get_available_stock(prod['key_type'])
-    text = f"🛍 {prod['name']}\n{label}: {price:,}đ\n📦 Còn: {stock}"
-    parent = prod['parent_id']
-    back_cb = f"cat_back:{parent}" if parent is not None else "cat_back:root"
-    keyboard = [
-        [InlineKeyboardButton("🛒 Mua ngay", callback_data=f"buy:{prod_id}")],
-        [InlineKeyboardButton("🔙 Quay lại", callback_data=back_cb)],
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+# ======================== LỆNH NẠP TIỀN ========================
+async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /nap <số tiền> - Tạo QR SePay và tự động cộng tiền"""
+    
+    print("🚨 LỆNH NAP ĐƯỢC GỌI!")
+    print(f"📥 Tin nhắn: {update.message.text}")
+    print(f"👤 User ID: {update.effective_user.id}")
+    
     user_id = update.effective_user.id
-    prod_id = int(query.data.split(":")[1])
-    prod = await get_category(prod_id)
-    if not prod or prod['type'] != 'product' or not prod['active']:
-        await query.answer("Sản phẩm không khả dụng.", show_alert=True)
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Vui lòng nhập số tiền.\n"
+            "Ví dụ: `/nap 100000`",
+            parse_mode='Markdown'
+        )
         return
-    user = await get_user(user_id)
-    if not user:
-        await query.answer("Bạn chưa đăng ký.", show_alert=True)
+    
+    try:
+        amount = int(context.args[0])
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Vui lòng nhập số tiền hợp lệ (số nguyên dương).")
         return
-    if user['role'] == 'seller' and prod['price_seller'] > 0:
-        price = prod['price_seller']
-    else:
-        price = prod['price']
-    if user['balance'] < price:
-        await query.answer(f"Không đủ tiền! Số dư: {user['balance']:,}đ", show_alert=True)
-        return
-    key_value = await take_one_key(prod['key_type'], user_id)
-    if not key_value:
-        await query.answer("Hết key! Liên hệ admin.", show_alert=True)
-        return
-    await update_balance(user_id, -price)
+    
+    print(f"📥 User {user_id} nạp {amount}đ")
+    
+    # Tạo mã giao dịch NGẮN GỌN
+    order_code = f"PUNIE_{int(time.time())}_{random.randint(100,999)}"
+    transfer_content = order_code
+    
+    print(f"📝 Mã giao dịch: {order_code}")
+    
+    # Lưu vào database với trạng thái pending
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,?,?)',
-                         (user_id, -price, 'purchase', f'Mua {prod["name"]}'))
+        await db.execute('INSERT INTO pending_nap (user_id, amount, trans_id) VALUES (?,?,?)',
+                         (user_id, amount, order_code))
         await db.commit()
-    await query.edit_message_text(f"✅ Mua thành công!\n🔑 Key: `{key_value}`", parse_mode='Markdown')
-    # bot.py - Phần 8
-
+    
+    context.user_data['nap_trans_id'] = order_code
+    
+    # Tạo QR SePay
+    qr_path = generate_sepay_qr(amount, transfer_content)
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Kiểm tra đã nhận", callback_data=f"check_nap:{order_code}")],
+        [InlineKeyboardButton("❌ Hủy", callback_data=f"cancel_nap:{order_code}")]
+    ]
+    
+    caption = (
+        f"💳 **Chuyển khoản {amount:,}đ**\n\n"
+        f"🏦 Ngân hàng: **MB Bank**\n"
+        f"📋 Số tài khoản: `{SEPAY_ACCOUNT_NUMBER}`\n"
+        f"👤 Chủ tài khoản: {SEPAY_ACCOUNT_NAME}\n"
+        f"📝 **Nội dung bắt buộc:** `{transfer_content}`\n\n"
+        f"✅ **Bot sẽ TỰ ĐỘNG cộng tiền** khi bạn chuyển khoản thành công!\n"
+        f"⏱️ Thời gian xử lý: 1-2 phút\n"
+        f"⏰ Lệnh có hiệu lực trong 60 phút."
+    )
+    
+    # Gửi QR
+    if qr_path and os.path.exists(qr_path):
+        try:
+            with open(qr_path, 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=caption,
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            os.remove(qr_path)
+            print(f"✅ Đã gửi QR SePay cho user {user_id}")
+            return
+        except Exception as e:
+            print(f"❌ Lỗi gửi ảnh QR: {e}")
+    
+    # Fallback: gửi link QR
+    qr_url = f"https://qr.sepay.vn/img?acc={SEPAY_ACCOUNT_NUMBER}&bank=MB&amount={amount}&des={urllib.parse.quote(transfer_content)}"
+    caption += f"\n\n🔗 [Bấm vào đây để xem mã QR]({qr_url})"
+    await update.message.reply_text(
+        caption,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True
+    )
+    print(f"✅ Đã gửi QR link cho user {user_id}")
 async def user_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
