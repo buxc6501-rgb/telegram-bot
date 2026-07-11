@@ -560,8 +560,8 @@ async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     print(f"📥 User {user_id} nạp {amount}đ")
     
-    # ✅ ĐÃ SỬA: Chỉ số, không có chữ, không có dấu _
-    order_code = f"{int(time.time())}{random.randint(100,999)}"
+    # ✅ NỘI DUNG MỚI: "Punie" + số ngẫu nhiên, KHÔNG có dấu _
+    order_code = f"Punie{int(time.time())}{random.randint(100,999)}"
     transfer_content = order_code
     
     print(f"📝 Mã giao dịch: {order_code}")
