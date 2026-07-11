@@ -528,48 +528,11 @@ async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_balance(user_id, -price)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,?,?)',
-                         (user_id, -price, 'purchase', f'Mua {prod["name"]}'))
+                         (user_id, -price, 'purchase', f'Mua {pr["name"]}'))
         await db.commit()
     await query.edit_message_text(f"✅ Mua thành công!\n🔑 Key: `{key_value}`", parse_mode='Markdown')
-    # bot.py - Phần 8
+# ======================== PHẦN 8: LỆNH NẠP TIỀN ========================
 
-async def user_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    print(f"📌 User menu: {data}")
-    
-    if data == "user:menu":
-        await query.edit_message_text("🏠 Menu chính", reply_markup=user_main_menu())
-    elif data == "user:balance":
-        user = await get_user(update.effective_user.id)
-        await query.edit_message_text(f"💰 Số dư: {user['balance']:,}đ")
-    elif data == "user:history":
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('SELECT * FROM transactions WHERE user_id=? ORDER BY created_at DESC LIMIT 10',
-                                  (update.effective_user.id,)) as cursor:
-                trans = await cursor.fetchall()
-        if trans:
-            text = "📋 Lịch sử:\n" + "\n".join(
-                [f"{t['type']}: {abs(t['amount']):,}đ - {t['description']} ({t['created_at']})" for t in trans])
-        else:
-            text = "Chưa có giao dịch."
-        await query.edit_message_text(text)
-    elif data == "user:buy":
-        await show_categories(update, context, None)
-    elif data == "user:nap":
-        await query.edit_message_text(
-            "💳 **Hướng dẫn nạp tiền:**\n\n"
-            "Sử dụng lệnh: `/nap <số tiền>`\n"
-            "Ví dụ: `/nap 100000`\n\n"
-            "Bot sẽ tạo mã QR SePay cho bạn chuyển khoản.\n"
-            "Sau khi chuyển, bot sẽ **tự động cộng tiền** vào số dư!",
-            parse_mode='Markdown'
-        )
-
-# ======================== LỆNH NẠP TIỀN (ĐÃ SỬA - PUNIE_) ========================
 async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lệnh /nap <số tiền> - Tạo QR SePay và tự động cộng tiền"""
     
@@ -597,8 +560,8 @@ async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     print(f"📥 User {user_id} nạp {amount}đ")
     
-    # Tạo mã giao dịch NGẮN GỌN - PUNIE_
-    order_code = f"PUNIE_{int(time.time())}_{random.randint(100,999)}"
+    # ✅ ĐÃ SỬA: Chỉ số, không có chữ, không có dấu _
+    order_code = f"{int(time.time())}{random.randint(100,999)}"
     transfer_content = order_code
     
     print(f"📝 Mã giao dịch: {order_code}")
@@ -624,7 +587,7 @@ async def nap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 Chủ tài khoản: {SEPAY_ACCOUNT_NAME}\n"
         f"📝 **Nội dung bắt buộc:** `{transfer_content}`\n\n"
         f"✅ **Bot sẽ TỰ ĐỘNG cộng tiền** khi bạn chuyển khoản thành công!\n"
-        f"⏱️ Thời gian xử lý: 1-2 phút\n"
+        f"⏱️ Thời gian xử lý: 5-10 giây\n"
         f"⏰ Lệnh có hiệu lực trong 60 phút."
     )
     
