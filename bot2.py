@@ -429,53 +429,67 @@ def user_main_menu():
         [InlineKeyboardButton("💳 Nạp tiền", callback_data="user:nap")],
     ]
     return InlineKeyboardMarkup(keyboard)
-    # bot.py - Phần 6
+   # bot.py - Phần 6
 
-# ======================== USER HANDLERS ========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await create_user(user.id, user.username or user.full_name)
-    await update.message.reply_text(
-        f"Xin chào {user.full_name}!",
-        reply_markup=user_main_menu()
-    )
+# ======================== KEYBOARDS ========================
+def admin_main_menu():
+    keyboard = [
+        [InlineKeyboardButton("📂 Danh mục", callback_data="admin:category")],
+        [InlineKeyboardButton("🔑 Key", callback_data="admin:key")],
+        [InlineKeyboardButton("👥 User", callback_data="admin:user")],
+        [InlineKeyboardButton("💰 Tiền", callback_data="admin:money")],
+        [InlineKeyboardButton("📊 Thống kê", callback_data="admin:stats")],
+        [InlineKeyboardButton("⚙️ Cài đặt", callback_data="admin:settings")],
+        [InlineKeyboardButton("📢 Thông báo", callback_data="admin:broadcast")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None):
-    cats = await get_categories(parent_id)
-    keyboard = []
-    for cat in cats:
-        icon = cat['icon'] + ' ' if cat['icon'] else ''
-        text = f"{icon}{cat['name']} {'▶️' if cat['type']=='category' else ''}"
-        cb = f"cat:{cat['id']}" if cat['type']=='category' else f"prod:{cat['id']}"
-        keyboard.append([InlineKeyboardButton(text, callback_data=cb)])
-    if parent_id is not None:
-        p = await get_category(parent_id)
-        grand = p['parent_id'] if p else None
-        back = f"cat_back:{grand}" if grand is not None else "cat_back:root"
-        keyboard.append([InlineKeyboardButton("🔙 Quay lại", callback_data=back)])
-    else:
-        keyboard.append([InlineKeyboardButton("🔙 Trang chính", callback_data="user:menu")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        await update.callback_query.edit_message_text("🛒 Chọn danh mục:", reply_markup=reply_markup)
-    else:
-        await update.message.reply_text("🛒 Chọn danh mục:", reply_markup=reply_markup)
+def user_main_menu():
+    keyboard = [
+        [InlineKeyboardButton("🛒 Mua Key", callback_data="user:buy")],
+        [InlineKeyboardButton("💰 Số dư", callback_data="user:balance")],
+        [InlineKeyboardButton("📋 Lịch sử", callback_data="user:history")],
+        [InlineKeyboardButton("💳 Nạp tiền", callback_data="user:nap")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ======================== USER MENU HANDLER ========================
+async def user_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý menu chính của user"""
     query = update.callback_query
-    data = query.data
     await query.answer()
-    if data == "cat_back:root":
+    data = query.data
+
+    print(f"📌 User menu: {data}")
+
+    if data == "user:menu":
+        await query.edit_message_text("🏠 Menu chính", reply_markup=user_main_menu())
+    elif data == "user:balance":
+        user = await get_user(update.effective_user.id)
+        await query.edit_message_text(f"💰 Số dư: {user['balance']:,}đ")
+    elif data == "user:history":
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('SELECT * FROM transactions WHERE user_id=? ORDER BY created_at DESC LIMIT 10',
+                                  (update.effective_user.id,)) as cursor:
+                trans = await cursor.fetchall()
+        if trans:
+            text = "📋 Lịch sử:\n" + "\n".join(
+                [f"{t['type']}: {abs(t['amount']):,}đ - {t['description']} ({t['created_at']})" for t in trans])
+        else:
+            text = "Chưa có giao dịch."
+        await query.edit_message_text(text)
+    elif data == "user:buy":
         await show_categories(update, context, None)
-    elif data.startswith("cat_back:"):
-        parent_id = int(data.split(":")[1])
-        await show_categories(update, context, parent_id)
-    elif data.startswith("cat:"):
-        cat_id = int(data.split(":")[1])
-        await show_categories(update, context, cat_id)
-    elif data.startswith("prod:"):
-        prod_id = int(data.split(":")[1])
-        await product_detail(update, context, prod_id)
+    elif data == "user:nap":
+        await query.edit_message_text(
+            "💳 **Hướng dẫn nạp tiền:**\n\n"
+            "Sử dụng lệnh: `/nap <số tiền>`\n"
+            "Ví dụ: `/nap 100000`\n\n"
+            "Bot sẽ tạo mã QR SePay cho bạn chuyển khoản.\n"
+            "Sau khi chuyển, bot sẽ **tự động cộng tiền** vào số dư!",
+            parse_mode='Markdown'
+        )
         # bot.py - Phần 7
 
 async def product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, prod_id: int):
