@@ -237,68 +237,98 @@ def sepay_get_transactions(limit=50):
 
 # ======================== SEPAY POLLING ========================
 async def sepay_polling(context: ContextTypes.DEFAULT_TYPE):
-    """Polling SePay mỗi 30 giây để kiểm tra giao dịch mới và tự động cộng tiền"""
-    print("🔄 Bắt đầu polling SePay...")
+    """Kiểm tra giao dịch SePay mỗi 5 giây"""
+    print("✅ SePay Polling Started")
+
     while True:
-        await asyncio.sleep(30)
         try:
-            transactions = sepay_get_transactions(50)
-            if not transactions:
-                continue
-            
+            await asyncio.sleep(5)
+
+            # Lấy danh sách lệnh pending
+            pendings = []
             async with aiosqlite.connect(DB_PATH) as db:
                 db.row_factory = aiosqlite.Row
-                async with db.execute('SELECT * FROM pending_nap WHERE status="pending"') as cursor:
-                    pendings = await cursor.fetchall()
-            
+                async with db.execute("""
+                    SELECT *
+                    FROM pending_nap
+                    WHERE status='pending'
+                """) as cur:
+                    pendings = await cur.fetchall()
+
             if not pendings:
                 continue
-            
-            print(f"📋 Có {len(pendings)} lệnh đang chờ, {len(transactions)} giao dịch mới")
-            
-            for pending in pendings:
-                order_code = pending['trans_id']
-                amount = pending['amount']
-                user_id = pending['user_id']
-                
-                print(f"🔍 Tìm giao dịch với nội dung: {order_code}")
-                
-                for tx in transactions:
-                    tx_content = tx.get('transaction_content', '')
-                    tx_amount = abs(tx.get('amount', 0))
-                    
-                    if order_code.strip().lower() in tx_content.strip().lower() and tx_amount == amount:
-                        print(f"✅ TÌM THẤY GIAO DỊCH KHỚP!")
-                        print(f"   Nội dung: {tx_content}")
-                        print(f"   Số tiền: {tx_amount}")
-                        
-                        async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute('UPDATE pending_nap SET status="completed" WHERE id=?', (pending['id'],))
-                            await db.commit()
-                        
-                        await update_balance(user_id, amount)
-                        async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,?,?)',
-                                             (user_id, amount, 'deposit', f'Nạp tiền tự động - {order_code}'))
-                            await db.commit()
-                        
-                        try:
-                            user = await get_user(user_id)
-                            await context.bot.send_message(
-                                chat_id=user_id,
-                                text=f"✅ **Nạp tiền thành công!**\n\n"
-                                     f"💰 Số tiền: +{amount:,}đ\n"
-                                     f"💳 Số dư mới: {user['balance'] + amount:,}đ\n"
-                                     f"📝 Mã giao dịch: `{order_code}`",
-                                parse_mode='Markdown'
-                            )
-                        except:
-                            pass
-                        break
-        except Exception as e:
-            print(f"Polling error: {e}")
 
-# ======================== FLASK WEBHOOK ========================
+            # Lấy giao dịch từ SePay
+            transactions = sepay_get_transactions(20)
+            if not transactions:
+                continue
+
+            for pending in pendings:
+                order_code = pending["trans_id"].strip()
+                amount = int(pending["amount"])
+                user_id = pending["user_id"]
+
+                found = None
+                for tx in transactions:
+                    content = str(tx.get("transaction_content", "")).strip()
+                    money = abs(int(float(tx.get("amount", 0))))
+                    if order_code.lower() == content.lower() and money == amount:
+                        found = tx
+                        break
+
+                if not found:
+                    continue
+
+                # Xử lý giao dịch thành công
+                async with aiosqlite.connect(DB_PATH) as db:
+                    # Kiểm tra trạng thái lần nữa
+                    async with db.execute("""
+                        SELECT status
+                        FROM pending_nap
+                        WHERE id=?
+                    """, (pending["id"],)) as cur:
+                        check = await cur.fetchone()
+                    if not check or check[0] == "completed":
+                        continue
+
+                    await db.execute("""
+                        UPDATE pending_nap
+                        SET status='completed'
+                        WHERE id=?
+                    """, (pending["id"],))
+
+                    await db.execute("""
+                        UPDATE users
+                        SET balance = balance + ?
+                        WHERE user_id = ?
+                    """, (amount, user_id))
+
+                    await db.execute("""
+                        INSERT INTO transactions
+                        (user_id, amount, type, description)
+                        VALUES (?, ?, ?, ?)
+                    """, (user_id, amount, "deposit", f"SePay {order_code}"))
+
+                    await db.commit()
+
+                # Gửi thông báo thành công
+                try:
+                    user = await get_user(user_id)
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            "✅ Nạp tiền thành công\n\n"
+                            f"💰 +{amount:,}đ\n"
+                            f"💳 Số dư: {user['balance']:,}đ"
+                        )
+                    )
+                except Exception as e:
+                    print("Send message error:", e)
+
+                print(f"✅ Deposit Success {order_code}")
+
+        except Exception as e:
+            print("Polling Error:", e)
 from flask import Flask, request, jsonify
 import threading
 
